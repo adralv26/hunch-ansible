@@ -1,0 +1,365 @@
+---
+- name: Complete Docker and Prometheus Setup using community.docker
+  hosts: all
+  become: yes
+  vars:
+    # Docker configuration
+    docker_compose_version: "v2.23.0"
+    
+    # Prometheus configuration
+    prometheus_port: 9090
+    node_exporter_port: 9100
+    prometheus_data_dir: "/opt/prometheus/data"
+    prometheus_config_dir: "/opt/prometheus/config"
+    
+    # Docker images
+    prometheus_image: "prom/prometheus:latest"
+    node_exporter_image: "prom/node-exporter:latest"
+    cadvisor_image: "gcr.io/cadvisor/cadvisor:latest"
+
+  pre_tasks:
+    - name: Check if Ansible meets version requirements for community.docker
+      ansible.builtin.assert:
+        that:
+          - ansible_version.full is version_compare('2.9', '>=')
+        success_msg: "Ansible version {{ ansible_version.full }} is compatible with community.docker"
+        fail_msg: "Ansible version {{ ansible_version.full }} is too old. Need 2.9+ for community.docker"
+
+  tasks:
+    # === PART 1: Install Docker ===
+    - name: Update apt package cache
+      ansible.builtin.apt:
+        update_cache: yes
+        cache_valid_time: 3600
+      tags: docker
+
+    - name: Install prerequisite packages
+      ansible.builtin.apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - gnupg
+          - lsb-release
+        state: present
+      tags: docker
+
+    - name: Add Docker's official GPG key
+      ansible.builtin.apt_key:
+        url: "https://download.docker.com/linux/debian/gpg"
+        state: present
+      tags: docker
+
+    - name: Add Docker APT repository
+      ansible.builtin.apt_repository:
+        repo: "deb [arch={{ ansible_architecture }}] https://download.docker.com/linux/debian {{ ansible_distribution_release }} stable"
+        state: present
+        update_cache: yes
+      tags: docker
+
+    - name: Install Docker Engine
+      ansible.builtin.apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: present
+      tags: docker
+
+    - name: Start and enable Docker service
+      ansible.builtin.systemd:
+        name: docker
+        state: started
+        enabled: yes
+        daemon_reload: yes
+      tags: docker
+
+    - name: Install Docker Compose (standalone - optional)
+      ansible.builtin.get_url:
+        url: "https://github.com/docker/compose/releases/download/{{ docker_compose_version }}/docker-compose-linux-{{ ansible_architecture }}"
+        dest: "/usr/local/bin/docker-compose"
+        mode: "0755"
+      when: ansible_architecture == "x86_64" or ansible_architecture == "aarch64"
+      tags: docker
+
+    - name: Add current user to docker group
+      ansible.builtin.user:
+        name: "{{ ansible_user }}"
+        groups: docker
+        append: yes
+      tags: docker
+
+    - name: Verify Docker installation
+      ansible.builtin.command:
+        cmd: docker --version
+      register: docker_version
+      changed_when: false
+      tags: docker
+
+    - name: Display Docker version
+      ansible.builtin.debug:
+        msg: "Docker installed: {{ docker_version.stdout }}"
+      tags: docker
+
+    # === PART 2: Prepare for community.docker usage ===
+    - name: Create necessary directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+      loop:
+        - "{{ prometheus_data_dir }}"
+        - "{{ prometheus_config_dir }}"
+        - "/opt/grafana"  # Optional for future Grafana setup
+      tags: directories
+
+    # === PART 3: Configure Prometheus ===
+    - name: Create Prometheus configuration file
+      ansible.builtin.template:
+        src: |
+          # Jinja2 template for prometheus.yml
+          global:
+            scrape_interval: 15s
+            evaluation_interval: 15s
+
+          # Alertmanager configuration
+          # alerting:
+          #   alertmanagers:
+          #     - static_configs:
+          #         - targets:
+          #           # - alertmanager:9093
+
+          # Load rules once and periodically evaluate them according to the global 'evaluation_interval'.
+          rule_files:
+            # - "first_rules.yml"
+            # - "second_rules.yml"
+
+          # A scrape configuration containing exactly one endpoint to scrape:
+          scrape_configs:
+            # Prometheus itself
+            - job_name: 'prometheus'
+              static_configs:
+                - targets: ['localhost:{{ prometheus_port }}']
+                  labels:
+                    service: 'prometheus'
+                    host: '{{ ansible_hostname }}'
+
+            # Node Exporter for system metrics
+            - job_name: 'node_exporter'
+              static_configs:
+                - targets: ['{{ ansible_default_ipv4.address }}:{{ node_exporter_port }}']
+                  labels:
+                    service: 'node_exporter'
+                    host: '{{ ansible_hostname }}'
+                    instance: '{{ ansible_hostname }}-system'
+
+            # cAdvisor for container metrics
+            - job_name: 'cadvisor'
+              static_configs:
+                - targets: ['{{ ansible_default_ipv4.address }}:8080']
+                  labels:
+                    service: 'cadvisor'
+                    host: '{{ ansible_hostname }}'
+                    instance: '{{ ansible_hostname }}-containers'
+        dest: "{{ prometheus_config_dir }}/prometheus.yml"
+        owner: root
+        group: root
+        mode: '0644'
+      tags: prometheus
+
+    # === PART 4: Pull Docker images using community.docker ===
+    - name: Pull Prometheus image
+      community.docker.docker_image:
+        name: "{{ prometheus_image }}"
+        source: pull
+        force_source: yes
+      tags: docker-images
+
+    - name: Pull Node Exporter image
+      community.docker.docker_image:
+        name: "{{ node_exporter_image }}"
+        source: pull
+        force_source: yes
+      tags: docker-images
+
+    - name: Pull cAdvisor image (optional container metrics)
+      community.docker.docker_image:
+        name: "{{ cadvisor_image }}"
+        source: pull
+        force_source: yes
+      tags: docker-images
+
+    # === PART 5: Create and run containers using community.docker ===
+    - name: Create Node Exporter container (system metrics)
+      community.docker.docker_container:
+        name: node_exporter
+        image: "{{ node_exporter_image }}"
+        state: started
+        restart_policy: always
+        network_mode: host
+        pid_mode: host
+        volumes:
+          - "/proc:/host/proc:ro"
+          - "/sys:/host/sys:ro"
+          - "/:/rootfs:ro"
+        command:
+          - '--path.procfs=/host/proc'
+          - '--path.rootfs=/rootfs'
+          - '--path.sysfs=/host/sys'
+          - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
+        labels:
+          monitor: "system"
+        docker_host: "unix:///var/run/docker.sock"
+      tags: containers
+
+    - name: Create cAdvisor container (container metrics - optional)
+      community.docker.docker_container:
+        name: cadvisor
+        image: "{{ cadvisor_image }}"
+        state: started
+        restart_policy: always
+        ports:
+          - "8080:8080"
+        volumes:
+          - "/:/rootfs:ro"
+          - "/var/run:/var/run:ro"
+          - "/sys:/sys:ro"
+          - "/var/lib/docker/:/var/lib/docker:ro"
+          - "/dev/disk/:/dev/disk:ro"
+        privileged: true
+        devices:
+          - "/dev/kmsg"
+        labels:
+          monitor: "containers"
+        docker_host: "unix:///var/run/docker.sock"
+      tags: containers
+
+    - name: Create Prometheus container
+      community.docker.docker_container:
+        name: prometheus
+        image: "{{ prometheus_image }}"
+        state: started
+        restart_policy: always
+        ports:
+          - "{{ prometheus_port }}:9090"
+        volumes:
+          - "{{ prometheus_config_dir }}/prometheus.yml:/etc/prometheus/prometheus.yml"
+          - "{{ prometheus_data_dir }}:/prometheus"
+        command:
+          - '--config.file=/etc/prometheus/prometheus.yml'
+          - '--storage.tsdb.path=/prometheus'
+          - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+          - '--web.console.templates=/usr/share/prometheus/consoles'
+          - '--storage.tsdb.retention.time=30d'
+          - '--web.enable-lifecycle'
+          - '--web.enable-admin-api'
+        labels:
+          monitor: "prometheus"
+        docker_host: "unix:///var/run/docker.sock"
+      tags: containers
+
+    # === PART 6: Configure firewall (optional) ===
+    - name: Check if ufw is installed
+      ansible.builtin.stat:
+        path: /usr/sbin/ufw
+      register: ufw_installed
+      tags: firewall
+
+    - name: Open ports in ufw firewall
+      ansible.builtin.ufw:
+        rule: allow
+        port: "{{ item }}"
+        proto: tcp
+      loop:
+        - "{{ prometheus_port }}"
+        - "{{ node_exporter_port }}"
+        - 8080  # cAdvisor
+      when: ufw_installed.stat.exists
+      tags: firewall
+
+    # === PART 7: Verify the setup ===
+    - name: Wait for services to start
+      ansible.builtin.wait_for:
+        port: "{{ item.port }}"
+        host: "{{ ansible_default_ipv4.address }}"
+        timeout: 30
+      loop:
+        - { port: "{{ prometheus_port }}", name: "Prometheus" }
+        - { port: "{{ node_exporter_port }}", name: "Node Exporter" }
+        - { port: 8080, name: "cAdvisor" }
+      tags: verify
+
+    - name: Test Prometheus endpoint
+      ansible.builtin.uri:
+        url: "http://{{ ansible_default_ipv4.address }}:{{ prometheus_port }}/-/healthy"
+        method: GET
+        status_code: 200
+        timeout: 10
+      register: prometheus_health
+      tags: verify
+
+    - name: Test Node Exporter endpoint
+      ansible.builtin.uri:
+        url: "http://{{ ansible_default_ipv4.address }}:{{ node_exporter_port }}/metrics"
+        method: GET
+        status_code: 200
+        timeout: 10
+      register: node_exporter_health
+      tags: verify
+
+    - name: Display service status
+      ansible.builtin.debug:
+        msg: |
+          Services deployed successfully:
+          - Prometheus: http://{{ ansible_default_ipv4.address }}:{{ prometheus_port }}
+          - Node Exporter metrics: http://{{ ansible_default_ipv4.address }}:{{ node_exporter_port }}/metrics
+          - cAdvisor (container metrics): http://{{ ansible_default_ipv4.address }}:8080
+          
+          Prometheus targets should be visible at: http://{{ ansible_default_ipv4.address }}:{{ prometheus_port }}/targets
+      tags: verify
+
+  post_tasks:
+    - name: Display Docker container status
+      ansible.builtin.command:
+        cmd: docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+      register: container_status
+      changed_when: false
+      tags: verify
+
+    - name: Show running containers
+      ansible.builtin.debug:
+        msg: |
+          Running Docker containers:
+          {{ container_status.stdout_lines | join('\n') }}
+      tags: verify
+
+    - name: Create verification script
+      ansible.builtin.copy:
+        dest: "/usr/local/bin/check-monitoring.sh"
+        content: |
+          #!/bin/bash
+          echo "=== Monitoring Services Status ==="
+          echo ""
+          echo "1. Docker containers:"
+          docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+          echo ""
+          echo "2. Service endpoints:"
+          echo "   Prometheus UI:      http://$(hostname -I | awk '{print $1}'):9090"
+          echo "   Node Exporter:      http://$(hostname -I | awk '{print $1}'):9100/metrics"
+          echo "   cAdvisor:           http://$(hostname -I | awk '{print $1}'):8080"
+          echo ""
+          echo "3. Quick health checks:"
+          curl -s http://localhost:9090/-/healthy | grep -q "Prometheus" && echo "✓ Prometheus is healthy" || echo "✗ Prometheus is not responding"
+          curl -s http://localhost:9100/metrics 2>/dev/null | head -1 | grep -q "# HELP" && echo "✓ Node Exporter is collecting metrics" || echo "✗ Node Exporter is not responding"
+          echo ""
+          echo "=== To view metrics in Prometheus ==="
+          echo "Visit: http://$(hostname -I | awk '{print $1}'):9090"
+          echo "Go to Status -> Targets to see all monitored endpoints"
+        owner: root
+        group: root
+        mode: '0755'
+      tags: verify
