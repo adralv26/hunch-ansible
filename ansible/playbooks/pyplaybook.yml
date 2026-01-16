@@ -1,18 +1,31 @@
 ---
-- name: Test Playbook
-  hosts: managed
+- name: Check for Python updates on Debian systems
+  hosts: all
   become: yes
+  gather_facts: yes
 
   tasks:
     - name: Update apt cache
       apt:
         update_cache: yes
         cache_valid_time: 3600
+      changed_when: false
 
-    - name: Install common packages
+    - name: Check for Python 3 updates (dry run)
       apt:
-        name:
-          - curl
-          - wget
-          - htop
-        state: present
+        name: python3
+        state: latest
+      check_mode: yes  
+      register: python_update_check
+
+    - name: Display current Python version
+      command: python3 --version
+      register: current_version
+      changed_when: false
+
+    - name: Show update status
+      debug:
+        msg:
+          - "Host: {{ inventory_hostname }}"
+          - "Current Python version: {{ current_version.stdout }}"
+          - "Python updates available: {{ 'YES' if python_update_check.changed else 'NO' }}"

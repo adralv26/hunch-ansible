@@ -1,0 +1,15 @@
+---
+- name: Deploy Docker image   
+  hosts: managed
+  tasks:
+      - name: Pull Docker Image
+        docker_image:
+          name: hello-world
+          source: pull
+          tag: latest
+
+      - name: Start Docker container
+        docker_container:
+          name: hello_world_container
+          image: hello-world:latest
+          state: started
