@@ -1,0 +1,32 @@
+---
+- name: Pull image and start the container
+  hosts: localhost
+  gather_facts: false
+  module_defaults:
+    group/community.docker.docker:
+      # Select Docker Daemon on other host
+      docker_host: tcp://192.168.79.135:8080
+      # Configure TLS
+      tls: true
+      validate_certs: true
+      tls_hostname: docker.example.com
+      # Increase timeout
+      timeout: 120
+  tasks:
+    - name: Pull image
+      community.docker.docker_image_pull:
+        name: python
+        tag: 3.12
+
+    - name: Start container
+      community.docker.docker_container:
+        cleanup: true
+        command: python --version
+        detach: false
+        image: python:3.12
+        name: my-python-container
+        output_logs: true
+
+    - name: Show output
+      ansible.builtin.debug:
+        msg: "{{ output.container.Output }}"
