@@ -1,0 +1,70 @@
+---
+- name: Deploy Docker image   
+  hosts: managed
+  tasks:
+      - name: Pull Docker Images
+        community.docker.docker_compose_v2_pull:
+          project_src: ~/prometheus-monitoring/config
+      - name: Start prometheus
+        community.docker.docker_container:
+          cleanup: true
+          command: 
+            - "--config.file=/etc/prometheus/prometheus.yml"
+            - "--storage.tsdb.path=/prometheus"
+            - "--storage.tsdb.retention.time=7d"
+            - "--web.enable-lifecycle"
+            - "--web.enable-admin-api"
+          detach: true
+          image: prom/prometheus:latest
+          name: prometheus
+          ports:
+            - "9090:9090"
+      - name: Start node-exporter
+        community.docker.docker_container:
+          cleanup: true
+          command: 
+            - '--path.procfs=/host/proc'
+            - '--path.rootfs=/rootfs'
+            - '--path.sysfs=/host/sys'
+            - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
+            - '--collector.netdev'
+            - '--collector.cpu'
+            - '--collector.meminfo'
+          detach: true
+          image: prom/node-exporter:latest
+          name: node-exporter
+          restart: false
+          ports:
+            - "9100:9100"
+      - name: Start cadvisor
+        community.docker.docker_container:
+          cleanup: true
+          devices:
+           - /dev/kmsg:/dev/kmsg
+          detach: true
+          image: gcr.io/cadvisor/cadvisor:latest
+          name: cadvisor
+          ports:
+            - "8080:8080"
+      - name: Start docker-exporter
+        community.docker.docker_container:
+          cleanup: true
+          command: 
+            - '--path.procfs=/host/proc'
+            - '--path.sysfs=/host/sys'
+            - '--collector.docker'
+            - '--collector.docker.cgroup'
+          detach: true
+          image: prom/node-exporter:latest
+          name: docker-exporter
+          restart: false
+          ports:
+            - "9323:9323"
+      - name: Start grafana
+        community.docker.docker_container:
+          cleanup: true
+          detach: true
+          image: grafana/grafana:latest
+          name: grafana
+          ports:
+            - "3000:3000"
