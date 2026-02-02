@@ -4,7 +4,7 @@
   tasks:
       - name: Pull Docker Images
         community.docker.docker_compose_v2_pull:
-          project_src: ~/prometheus-monitoring/config
+          project_src: ~/prometheus
       - name: Start prometheus
         community.docker.docker_container:
           cleanup: true
